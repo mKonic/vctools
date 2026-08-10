@@ -1,0 +1,6 @@
+# build output
+vc
+*.o
+
+# protocol glue is generated from XML at build time
+gen/
