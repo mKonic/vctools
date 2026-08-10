@@ -2,13 +2,12 @@
 # compositor, then drive it with synthetic input and capture it, without ever
 # touching the live session.
 #
-# Protocol glue is generated at build time from wayland-protocols' XML plus the
-# two wlroots protocols vendored in protocols/, so nothing generated is checked
-# in and a protocol bump is just a `make clean`.
+# Everything generated or compiled lands in build/; nothing is written into src/
+# and nothing generated is checked in, so a protocol bump is just `make clean`.
 
 CC      ?= gcc
 CFLAGS  ?= -O2 -Wall -Wextra -Wno-unused-parameter
-CFLAGS  += -std=gnu11 -Igen -Isrc $(shell pkg-config --cflags wayland-client xkbcommon zlib)
+CFLAGS  += -std=gnu11 -Ibuild/gen -Isrc $(shell pkg-config --cflags wayland-client xkbcommon zlib)
 LDLIBS  := $(shell pkg-config --libs wayland-client xkbcommon zlib)
 
 WLPROTO := $(shell pkg-config --variable=pkgdatadir wayland-protocols)
@@ -26,29 +25,37 @@ PROTOCOLS := \
 # just look the file up by name instead of hardcoding each path.
 xml = $(shell find $(WLPROTO) protocols -name "$(1).xml" 2>/dev/null | head -1)
 
-PROTO_SRC := $(PROTOCOLS:%=gen/%-protocol.c)
-PROTO_HDR := $(PROTOCOLS:%=gen/%-client-protocol.h)
-PROTO_OBJ := $(PROTO_SRC:.c=.o)
+GEN       := build/gen
+PROTO_SRC := $(PROTOCOLS:%=$(GEN)/%-protocol.c)
+PROTO_HDR := $(PROTOCOLS:%=$(GEN)/%-client-protocol.h)
+PROTO_OBJ := $(PROTOCOLS:%=build/obj/%-protocol.o)
 
 SRC := $(wildcard src/*.c)
-OBJ := $(SRC:.c=.o)
+OBJ := $(SRC:src/%.c=build/obj/%.o)
 
 .PHONY: all clean install test
 all: vc
 
-vc: $(PROTO_HDR) $(OBJ) $(PROTO_OBJ)
-	$(CC) $(CFLAGS) -o $@ $(OBJ) $(PROTO_OBJ) $(LDLIBS)
+vc: $(OBJ) $(PROTO_OBJ)
+	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
 
-# Every object depends on the generated headers existing first.
-$(OBJ): $(PROTO_HDR)
+build/obj/%.o: src/%.c $(PROTO_HDR)
+	@mkdir -p build/obj
+	$(CC) $(CFLAGS) -c -o $@ $<
 
-gen/%-client-protocol.h:
-	@mkdir -p gen
+build/obj/%-protocol.o: $(GEN)/%-protocol.c
+	@mkdir -p build/obj
+	$(CC) $(CFLAGS) -c -o $@ $<
+
+$(GEN)/%-client-protocol.h:
+	@mkdir -p $(GEN)
 	$(SCANNER) client-header $(call xml,$*) $@
 
-gen/%-protocol.c:
-	@mkdir -p gen
+$(GEN)/%-protocol.c:
+	@mkdir -p $(GEN)
 	$(SCANNER) private-code $(call xml,$*) $@
+
+.PRECIOUS: $(GEN)/%-protocol.c $(GEN)/%-client-protocol.h
 
 install: vc
 	install -Dm755 vc $(DESTDIR)$(HOME)/.local/bin/vc
@@ -57,4 +64,4 @@ test: vc
 	@./tests/run.sh
 
 clean:
-	rm -rf gen vc $(OBJ)
+	rm -rf build vc

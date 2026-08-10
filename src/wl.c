@@ -123,8 +123,14 @@ static void registry_global(void *data, struct wl_registry *r, uint32_t name, co
 	} else if (!strcmp(iface, zxdg_output_manager_v1_interface.name))
 		w->xdg_output_mgr = wl_registry_bind(r, name, &zxdg_output_manager_v1_interface,
 		                                     version < 3 ? version : 3);
-	else if (!strcmp(iface, ext_foreign_toplevel_list_v1_interface.name))
+	else if (!strcmp(iface, ext_foreign_toplevel_list_v1_interface.name)) {
 		w->toplevel_list = wl_registry_bind(r, name, &ext_foreign_toplevel_list_v1_interface, 1);
+		// The compositor starts replaying existing toplevels the moment this is
+		// bound, so the listener has to be attached here — attaching it after the
+		// next roundtrip means those events are dispatched into a NULL listener
+		// and every window looks invisible.
+		ext_foreign_toplevel_list_v1_add_listener(w->toplevel_list, &list_listener, w);
+	}
 	else if (!strcmp(iface, ext_foreign_toplevel_image_capture_source_manager_v1_interface.name))
 		w->window_source_mgr = wl_registry_bind(
 			r, name, &ext_foreign_toplevel_image_capture_source_manager_v1_interface, 1);
@@ -180,10 +186,7 @@ int vc_wl_connect(struct vc_wl *w, const char *display) {
 		}
 	}
 
-	if (w->toplevel_list) {
-		ext_foreign_toplevel_list_v1_add_listener(w->toplevel_list, &list_listener, w);
-		vc_wl_refresh_toplevels(w);
-	}
+	if (w->toplevel_list) vc_wl_refresh_toplevels(w);
 	return 0;
 }
 
@@ -205,10 +208,17 @@ struct vc_toplevel *vc_wl_find_toplevel(struct vc_wl *w, const char *match) {
 
 struct vc_output *vc_wl_output(struct vc_wl *w, const char *name) {
 	if (!w->n_outputs) return NULL;
-	if (!name || !*name) return &w->outputs[0];
+	if (name && *name) {
+		for (int i = 0; i < w->n_outputs; i++)
+			if (!strcmp(w->outputs[i].name, name)) return &w->outputs[i];
+		return NULL;
+	}
+	// Hyprland keeps a 0x0 FALLBACK monitor around whenever it has no real
+	// output; picking it would make every coordinate meaningless.
 	for (int i = 0; i < w->n_outputs; i++)
-		if (!strcmp(w->outputs[i].name, name)) return &w->outputs[i];
-	return NULL;
+		if (strcmp(w->outputs[i].name, "FALLBACK") && w->outputs[i].logical_w > 0)
+			return &w->outputs[i];
+	return &w->outputs[0];
 }
 
 void vc_wl_disconnect(struct vc_wl *w) {

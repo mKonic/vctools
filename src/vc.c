@@ -18,7 +18,8 @@ static int usage(void) {
 		"usage: vc [-v] <command>\n"
 		"\n"
 		"  box start <name> [--size WxH] [--scale S] [--hide WS]\n"
-		"                   [--host-input] [--decorated]\n"
+		"                   [--host-input] [--decorated] [--fullscreen]\n"
+		"                   [--rule '<lua window rule>']\n"
 		"  box kill <name> | box list | box env <name>\n"
 		"  box exec <name> -- <cmd> [args...]   run a program inside the box\n"
 		"\n"
@@ -84,6 +85,10 @@ static int cmd_box(int argc, char **argv) {
 				o.host_input = 1;
 			} else if (!strcmp(argv[i], "--decorated")) {
 				o.decorated = 1;
+			} else if (!strcmp(argv[i], "--fullscreen")) {
+				o.fullscreen = 1;
+			} else if (!strcmp(argv[i], "--rule") && i + 1 < argc) {
+				if (o.n_rules < VC_MAX_RULES) o.rules[o.n_rules++] = argv[++i];
 			} else {
 				vc_die("unknown option '%s'", argv[i]);
 			}
