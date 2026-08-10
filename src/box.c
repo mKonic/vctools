@@ -167,7 +167,7 @@ static const char *find_signature(const char *sockname) {
 	const char *out = vc_capture("hyprctl instances 2>/dev/null");
 	if (!out) return NULL;
 
-	char cur[256] = { 0 };
+	char cur[512] = { 0 };
 	const char *p = out;
 	while (*p) {
 		const char *eol = strchr(p, '\n');
