@@ -1,3 +1,7 @@
 # build output
 vc
 build/
+
+# stray captures
+*.png
+*.bgra

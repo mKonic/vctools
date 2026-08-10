@@ -12,6 +12,11 @@
 
 int vc_ctx_open(struct vc_ctx *c, const char *box) {
 	memset(c, 0, sizeof *c);
+
+	// "host" targets the live session instead of a box — that is what winshot
+	// did, and it is still the right tool for grabbing a window you are actually
+	// looking at. Input sent to the host is not isolated, by definition.
+	if (box && (!strcmp(box, "host") || !strcmp(box, "-"))) box = NULL;
 	c->box = box;
 
 	const char *display = box ? vc_box_display(box) : NULL;
