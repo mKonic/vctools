@@ -57,8 +57,12 @@ $(GEN)/%-protocol.c:
 
 .PRECIOUS: $(GEN)/%-protocol.c $(GEN)/%-client-protocol.h
 
+# A symlink rather than a copy, so ~/.local/bin/vc is whatever the last `make`
+# produced and there is no stale binary to forget about.
 install: vc
-	install -Dm755 vc $(DESTDIR)$(HOME)/.local/bin/vc
+	@mkdir -p $(DESTDIR)$(HOME)/.local/bin
+	ln -sfn $(CURDIR)/vc $(DESTDIR)$(HOME)/.local/bin/vc
+	@echo "linked $(DESTDIR)$(HOME)/.local/bin/vc -> $(CURDIR)/vc"
 
 test: vc
 	@./tests/run.sh
