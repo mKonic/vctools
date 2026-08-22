@@ -1,6 +1,7 @@
 #define _GNU_SOURCE
 #include "input.h"
 
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
@@ -16,100 +17,105 @@
 #define BTN_SIDE 0x113
 #define BTN_EXTRA 0x114
 
-// Slots 0..3 are permanently the modifier keys, so a chord never has to reshape
-// the keymap; everything else is assigned on demand.
-#define SLOT_SHIFT 0
-#define SLOT_CTRL 1
-#define SLOT_ALT 2
-#define SLOT_SUPER 3
-#define SLOT_FIRST_FREE 4
+// Spare keycodes for keysyms the layout has no key for. The evdev keycode file
+// leaves 257..359 unassigned, so binding these disturbs nothing real.
+#define VC_SPARE_BASE 300
+
+// A client must receive, mmap and compile a keymap before it can resolve
+// anything typed under it; a key event sent into that window is dropped.
+#define VC_KEYMAP_SETTLE_S 0.06
 
 static void flush(struct vc_input *in) {
 	wl_display_flush(in->w->dpy);
 	if (in->delay_ms > 0) vc_sleep_s(in->delay_ms / 1000.0);
 }
 
+/* --- modifiers ---------------------------------------------------------- */
+
+// The keysym that presses each VC_MOD_*, and the modifier it asserts.
+static const struct {
+	const char *keysym;  // the key that asserts it
+	const char *xkb_mod; // its name in the keymap
+} MOD_DEF[VC_N_MODS] = {
+	{ "Shift_L", XKB_MOD_NAME_SHIFT },   { "Control_L", XKB_MOD_NAME_CTRL },
+	{ "Alt_L", XKB_MOD_NAME_ALT },       { "Super_L", XKB_MOD_NAME_LOGO },
+	{ "ISO_Level3_Shift", "Mod5" },
+};
+
 /* --- keymap ------------------------------------------------------------- */
 
-// Returns the wayland keycode for `sym`, adding it to the keymap if needed.
-static int slot_for(struct vc_input *in, xkb_keysym_t sym) {
-	for (int i = 0; i < in->n_syms; i++)
-		if (in->syms[i] == sym) return i + 1;
-	if (in->n_syms >= VC_MAX_KEYSYMS) {
-		vc_warn("keymap full (%d keysyms)", VC_MAX_KEYSYMS);
-		return -1;
-	}
-	in->syms[in->n_syms++] = sym;
-	in->keymap_dirty = 1;
-	return in->n_syms; // slot index + 1
-}
-
-// Builds a keymap holding exactly the keysyms used so far, one per keycode.
+// One keymap, built from the standard evdev/us layout and sent once. Keys
+// therefore carry their canonical evdev scancode (Escape 1, Control_L 29, a
+// 30), so a client that reads the raw scancode instead of resolving it through
+// the keymap — GLFW does — agrees with one that resolves it properly.
+//
+// It also means the keymap never changes between two key events. It used to:
+// each new keysym got the next free slot and was sent immediately before its
+// own press, so a client still compiling the new keymap dropped that key while
+// every already-mapped key came through. Only keysyms `us` cannot reach at all
+// still grow the keymap, and callers bind those before pressing anything.
 static char *build_keymap(struct vc_input *in) {
-	size_t cap = 4096 + (size_t)in->n_syms * 128;
+	size_t cap = 1024 + (size_t)in->n_extra * 192;
 	char *s = malloc(cap);
 	if (!s) return NULL;
 	size_t n = 0;
 
-	n += (size_t)snprintf(s + n, cap - n,
-	                      "xkb_keymap {\n"
-	                      "xkb_keycodes \"vc\" {\n"
-	                      "\tminimum = 8;\n"
-	                      "\tmaximum = 255;\n");
-	for (int i = 0; i < in->n_syms; i++)
-		n += (size_t)snprintf(s + n, cap - n, "\t<K%d> = %d;\n", i + 9, i + 9);
+	n += (size_t)snprintf(s + n, cap - n, "xkb_keymap {\nxkb_keycodes { include \"evdev\"\n");
+	for (int i = 0; i < in->n_extra; i++)
+		n += (size_t)snprintf(s + n, cap - n, "\t<VC%d> = %d;\n", i, VC_SPARE_BASE + i);
 	n += (size_t)snprintf(s + n, cap - n,
 	                      "};\n"
-	                      "xkb_types \"vc\" { include \"complete\" };\n"
-	                      "xkb_compatibility \"vc\" { include \"complete\" };\n"
-	                      "xkb_symbols \"vc\" {\n"
-	                      "\tname[Group1] = \"vc\";\n");
-	for (int i = 0; i < in->n_syms; i++) {
+	                      "xkb_types { include \"complete\" };\n"
+	                      "xkb_compat { include \"complete\" };\n"
+	                      "xkb_symbols { include \"pc+us+inet(evdev)\"\n");
+	for (int i = 0; i < in->n_extra; i++) {
 		char name[128];
-		if (xkb_keysym_get_name(in->syms[i], name, sizeof name) <= 0)
-			snprintf(name, sizeof name, "0x%08x", in->syms[i]);
-		n += (size_t)snprintf(s + n, cap - n, "\tkey <K%d> { [ %s ] };\n", i + 9, name);
+		if (xkb_keysym_get_name(in->extra[i], name, sizeof name) <= 0)
+			snprintf(name, sizeof name, "0x%08x", in->extra[i]);
+		n += (size_t)snprintf(s + n, cap - n, "\tkey <VC%d> { [ %s ] };\n", i, name);
 	}
-	// Bind the four reserved slots to real modifiers so chords behave like a
-	// physical keyboard rather than a bare modifier mask.
-	n += (size_t)snprintf(s + n, cap - n,
-	                      "\tmodifier_map Shift { <K%d> };\n"
-	                      "\tmodifier_map Control { <K%d> };\n"
-	                      "\tmodifier_map Mod1 { <K%d> };\n"
-	                      "\tmodifier_map Mod4 { <K%d> };\n"
-	                      "};\n};\n",
-	                      SLOT_SHIFT + 9, SLOT_CTRL + 9, SLOT_ALT + 9, SLOT_SUPER + 9);
+	snprintf(s + n, cap - n, "};\n};\n");
 	return s;
+}
+
+// The evdev scancode carrying `sym` unmodified, or -1.
+static int plain_keycode(struct xkb_keymap *km, xkb_keysym_t sym) {
+	for (xkb_keycode_t kc = xkb_keymap_min_keycode(km); kc <= xkb_keymap_max_keycode(km); kc++) {
+		const xkb_keysym_t *syms;
+		int n = xkb_keymap_key_get_syms_by_level(km, kc, 0, 0, &syms);
+		for (int i = 0; i < n; i++)
+			if (syms[i] == sym) return (int)kc - 8;
+	}
+	return -1;
 }
 
 static int send_keymap(struct vc_input *in) {
 	char *text = build_keymap(in);
 	if (!text) return -1;
 
+	if (!in->xkb) in->xkb = xkb_context_new(XKB_CONTEXT_NO_FLAGS);
 	// Compile locally first: a keymap the compositor rejects is silently fatal
 	// (every later key event gets dropped), so fail loudly here instead.
-	struct xkb_context *ctx = xkb_context_new(XKB_CONTEXT_NO_FLAGS);
-	struct xkb_keymap *check =
-		xkb_keymap_new_from_string(ctx, text, XKB_KEYMAP_FORMAT_TEXT_V1, XKB_KEYMAP_COMPILE_NO_FLAGS);
-	if (!check) {
+	struct xkb_keymap *km = xkb_keymap_new_from_string(in->xkb, text, XKB_KEYMAP_FORMAT_TEXT_V1,
+	                                                   XKB_KEYMAP_COMPILE_NO_FLAGS);
+	if (!km) {
 		vc_warn("generated keymap failed to compile; some keysym is unnameable");
-		xkb_context_unref(ctx);
 		free(text);
 		return -1;
 	}
-	xkb_keymap_unref(check);
-	xkb_context_unref(ctx);
 
 	size_t len = strlen(text) + 1;
 	int fd = memfd_create("vc-keymap", MFD_CLOEXEC);
 	if (fd < 0 || ftruncate(fd, (off_t)len) < 0) {
 		vc_warn("memfd for keymap failed");
+		xkb_keymap_unref(km);
 		free(text);
 		return -1;
 	}
 	void *p = mmap(NULL, len, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
 	if (p == MAP_FAILED) {
 		close(fd);
+		xkb_keymap_unref(km);
 		free(text);
 		return -1;
 	}
@@ -121,7 +127,77 @@ static int send_keymap(struct vc_input *in) {
 	wl_display_roundtrip(in->w->dpy);
 	close(fd);
 
+	if (in->km) xkb_keymap_unref(in->km);
+	in->km = km;
+	for (int i = 0; i < VC_N_MODS; i++) {
+		xkb_mod_index_t idx = xkb_keymap_mod_get_index(km, MOD_DEF[i].xkb_mod);
+		in->mods[i].bit = idx == XKB_MOD_INVALID ? 0 : 1u << idx;
+		in->mods[i].code = plain_keycode(km, xkb_keysym_from_name(MOD_DEF[i].keysym, 0));
+	}
 	in->keymap_dirty = 0;
+	vc_sleep_s(VC_KEYMAP_SETTLE_S);
+	return 0;
+}
+
+// Finds how to produce `sym`: which key, and which modifiers must be held.
+// Searches level-major so the unmodified spelling of a keysym wins.
+static int lookup_sym(struct vc_input *in, xkb_keysym_t sym, int *code, uint32_t *mask) {
+	uint32_t reachable = 0;
+	for (int i = 0; i < VC_N_MODS; i++)
+		if (in->mods[i].code >= 0) reachable |= in->mods[i].bit;
+
+	for (xkb_level_index_t lvl = 0; lvl < 8; lvl++) {
+		for (xkb_keycode_t kc = xkb_keymap_min_keycode(in->km);
+		     kc <= xkb_keymap_max_keycode(in->km); kc++) {
+			if (lvl >= xkb_keymap_num_levels_for_key(in->km, kc, 0)) continue;
+			const xkb_keysym_t *syms;
+			int n = xkb_keymap_key_get_syms_by_level(in->km, kc, 0, lvl, &syms), hit = 0;
+			for (int i = 0; i < n; i++)
+				if (syms[i] == sym) { hit = 1; break; }
+			if (!hit) continue;
+			if (lvl == 0) {
+				*code = (int)kc - 8;
+				*mask = 0;
+				return 0;
+			}
+			xkb_mod_mask_t cand[16];
+			size_t got = xkb_keymap_key_get_mods_for_level(in->km, kc, 0, lvl, cand,
+			                                               sizeof cand / sizeof *cand);
+			for (size_t i = 0; i < got; i++)
+				if ((cand[i] & ~reachable) == 0) {
+					*code = (int)kc - 8;
+					*mask = cand[i];
+					return 0;
+				}
+		}
+	}
+	return -1;
+}
+
+// Queues a keysym the layout cannot reach onto a spare key. This is the only
+// thing that still changes the keymap, so callers must do it for every keysym
+// they are about to need before sending the first key event.
+static int want_spare(struct vc_input *in, xkb_keysym_t sym) {
+	for (int i = 0; i < in->n_extra; i++)
+		if (in->extra[i] == sym) return 0;
+	if (in->n_extra >= VC_MAX_EXTRA) {
+		vc_warn("out of spare keys (%d unmappable keysyms)", VC_MAX_EXTRA);
+		return -1;
+	}
+	in->extra[in->n_extra++] = sym;
+	in->keymap_dirty = 1;
+	return 0;
+}
+
+// lookup_sym, binding a spare key first if the layout cannot reach the keysym.
+static int resolve_sym(struct vc_input *in, xkb_keysym_t sym, int *code, uint32_t *mask) {
+	if (lookup_sym(in, sym, code, mask) == 0) return 0;
+	if (want_spare(in, sym) < 0) return -1;
+	if (in->keymap_dirty && send_keymap(in) < 0) return -1;
+	if (lookup_sym(in, sym, code, mask) < 0) {
+		vc_warn("no key can produce keysym 0x%04x", sym);
+		return -1;
+	}
 	return 0;
 }
 
@@ -133,12 +209,6 @@ static int kbd_ready(struct vc_input *in) {
 	if (!in->kbd) {
 		in->kbd = zwp_virtual_keyboard_manager_v1_create_virtual_keyboard(in->w->keyboard_mgr,
 		                                                                  in->w->seat);
-		// Reserve the modifier slots up front so their keycodes never move.
-		in->syms[SLOT_SHIFT] = XKB_KEY_Shift_L;
-		in->syms[SLOT_CTRL] = XKB_KEY_Control_L;
-		in->syms[SLOT_ALT] = XKB_KEY_Alt_L;
-		in->syms[SLOT_SUPER] = XKB_KEY_Super_L;
-		in->n_syms = SLOT_FIRST_FREE;
 		in->keymap_dirty = 1;
 	}
 	if (in->keymap_dirty && send_keymap(in) < 0) return -1;
@@ -159,33 +229,37 @@ static void set_mods(struct vc_input *in, uint32_t mask) {
 	wl_display_flush(in->w->dpy);
 }
 
-#define MOD_SHIFT (1u << 0)
-#define MOD_CTRL (1u << 2)
-#define MOD_ALT (1u << 3)
-#define MOD_SUPER (1u << 6)
-
-static int mod_slot(uint32_t bit) {
-	switch (bit) {
-	case MOD_SHIFT: return SLOT_SHIFT;
-	case MOD_CTRL: return SLOT_CTRL;
-	case MOD_ALT: return SLOT_ALT;
-	case MOD_SUPER: return SLOT_SUPER;
+// Holds down (or lets go of) every modifier in `mask`, pressing the real key
+// as well as asserting the mask, per set_mods above.
+static void hold_mods(struct vc_input *in, uint32_t mask, int down) {
+	if (down) {
+		for (int i = 0; i < VC_N_MODS; i++)
+			if ((mask & in->mods[i].bit) && in->mods[i].code >= 0)
+				raw_key(in, in->mods[i].code, 1);
+		set_mods(in, mask);
+	} else {
+		for (int i = VC_N_MODS; i-- > 0;)
+			if ((mask & in->mods[i].bit) && in->mods[i].code >= 0)
+				raw_key(in, in->mods[i].code, 0);
+		set_mods(in, 0);
 	}
+}
+
+static int mod_from_name(struct vc_input *in, const char *n) {
+	if (!strcasecmp(n, "shift")) return VC_MOD_SHIFT;
+	if (!strcasecmp(n, "ctrl") || !strcasecmp(n, "control")) return VC_MOD_CTRL;
+	if (!strcasecmp(n, "alt") || !strcasecmp(n, "mod1")) return VC_MOD_ALT;
+	if (!strcasecmp(n, "super") || !strcasecmp(n, "logo") || !strcasecmp(n, "meta") ||
+	    !strcasecmp(n, "mod4"))
+		return VC_MOD_SUPER;
+	if (!strcasecmp(n, "altgr") || !strcasecmp(n, "mod5") || !strcasecmp(n, "level3"))
+		return VC_MOD_LEVEL3;
+	(void)in;
 	return -1;
 }
 
-static uint32_t mod_from_name(const char *n) {
-	if (!strcasecmp(n, "shift")) return MOD_SHIFT;
-	if (!strcasecmp(n, "ctrl") || !strcasecmp(n, "control")) return MOD_CTRL;
-	if (!strcasecmp(n, "alt") || !strcasecmp(n, "mod1")) return MOD_ALT;
-	if (!strcasecmp(n, "super") || !strcasecmp(n, "logo") || !strcasecmp(n, "meta") ||
-	    !strcasecmp(n, "mod4"))
-		return MOD_SUPER;
-	return 0;
-}
-
 // Splits "ctrl+shift+p" into a modifier mask and the trailing keysym.
-static int parse_chord(const char *spec, uint32_t *mods, xkb_keysym_t *sym) {
+static int parse_chord(struct vc_input *in, const char *spec, uint32_t *mods, xkb_keysym_t *sym) {
 	char buf[256];
 	snprintf(buf, sizeof buf, "%s", spec);
 	*mods = 0;
@@ -193,12 +267,12 @@ static int parse_chord(const char *spec, uint32_t *mods, xkb_keysym_t *sym) {
 	char *part = buf, *plus;
 	while ((plus = strchr(part, '+')) && plus != part) {
 		*plus = 0;
-		uint32_t m = mod_from_name(part);
-		if (!m) {
+		int m = mod_from_name(in, part);
+		if (m < 0) {
 			vc_warn("unknown modifier '%s'", part);
 			return -1;
 		}
-		*mods |= m;
+		*mods |= in->mods[m].bit;
 		part = plus + 1;
 	}
 
@@ -231,17 +305,38 @@ static int ptr_ready(struct vc_input *in) {
 	return 0;
 }
 
+int vc_is_button_name(const char *name) {
+	if (!name || !*name) return 0;
+	if (!strcasecmp(name, "left") || !strcasecmp(name, "right") ||
+	    !strcasecmp(name, "middle") || !strcasecmp(name, "back") ||
+	    !strcasecmp(name, "side") || !strcasecmp(name, "forward") ||
+	    !strcasecmp(name, "extra")) return 1;
+	char *end = NULL;
+	strtoul(name, &end, 0);
+	return end && *end == '\0'; // a raw evdev code, and nothing but
+}
+
 static uint32_t button_code(const char *name) {
 	if (!name || !strcasecmp(name, "left")) return BTN_LEFT;
 	if (!strcasecmp(name, "right")) return BTN_RIGHT;
 	if (!strcasecmp(name, "middle")) return BTN_MIDDLE;
 	if (!strcasecmp(name, "back") || !strcasecmp(name, "side")) return BTN_SIDE;
 	if (!strcasecmp(name, "forward") || !strcasecmp(name, "extra")) return BTN_EXTRA;
-	return (uint32_t)strtoul(name, NULL, 0); // raw evdev code
+
+	char *end = NULL;
+	unsigned long raw = strtoul(name, &end, 0);
+	if (end && *end == '\0' && raw > 0) return (uint32_t)raw;
+
+	// Anything else used to fall through strtoul as button 0, which is not an evdev button at
+	// all: clients that derive their index as code - BTN_LEFT got a negative one and either
+	// asserted or wrote out of bounds. Refuse it loudly instead.
+	fprintf(stderr, "vc: '%s' is not a button; using left\n", name);
+	return BTN_LEFT;
 }
 
 int vc_input_init(struct vc_input *in, struct vc_wl *w, const char *output_name) {
 	memset(in, 0, sizeof *in);
+	for (int i = 0; i < VC_N_MODS; i++) in->mods[i].code = -1;
 	in->w = w;
 	in->out = vc_wl_output(w, output_name);
 	in->delay_ms = 8;
@@ -263,6 +358,10 @@ void vc_input_finish(struct vc_input *in) {
 		in->ptr = NULL;
 	}
 	if (in->w->dpy) wl_display_roundtrip(in->w->dpy);
+	if (in->km) xkb_keymap_unref(in->km);
+	if (in->xkb) xkb_context_unref(in->xkb);
+	in->km = NULL;
+	in->xkb = NULL;
 }
 
 int vc_input_move(struct vc_input *in, double x, double y) {
@@ -350,11 +449,13 @@ int vc_input_drag(struct vc_input *in, double x0, double y0, double x1, double y
 /* --- keyboard ----------------------------------------------------------- */
 
 static int tap_sym(struct vc_input *in, xkb_keysym_t sym) {
-	int code = slot_for(in, sym);
-	if (code < 0) return -1;
-	if (in->keymap_dirty && send_keymap(in) < 0) return -1;
+	int code;
+	uint32_t mask;
+	if (resolve_sym(in, sym, &code, &mask) < 0) return -1;
+	if (mask) hold_mods(in, mask, 1);
 	raw_key(in, code, 1);
 	raw_key(in, code, 0);
+	if (mask) hold_mods(in, mask, 0);
 	return 0;
 }
 
@@ -381,7 +482,8 @@ static uint32_t utf8_next(const char **p) {
 int vc_input_type(struct vc_input *in, const char *utf8) {
 	if (kbd_ready(in) < 0) return -1;
 
-	// Assign every character a keycode first, so the keymap is sent once.
+	// Bind every character the layout cannot reach first, so the keymap is
+	// settled before the first key event rather than replaced between two.
 	for (const char *p = utf8; *p;) {
 		uint32_t cp = utf8_next(&p);
 		xkb_keysym_t sym = cp == '\n' ? XKB_KEY_Return : xkb_utf32_to_keysym(cp);
@@ -389,7 +491,9 @@ int vc_input_type(struct vc_input *in, const char *utf8) {
 			vc_warn("no keysym for U+%04X, skipping", cp);
 			continue;
 		}
-		slot_for(in, sym);
+		int code;
+		uint32_t mask;
+		if (lookup_sym(in, sym, &code, &mask) < 0) want_spare(in, sym);
 	}
 	if (in->keymap_dirty && send_keymap(in) < 0) return -1;
 	set_mods(in, 0); // never inherit whatever state was left behind
@@ -408,25 +512,22 @@ static int chord(struct vc_input *in, const char *spec, int down, int up) {
 
 	uint32_t mods;
 	xkb_keysym_t sym;
-	if (parse_chord(spec, &mods, &sym) < 0) return -1;
+	if (parse_chord(in, spec, &mods, &sym) < 0) return -1;
 
-	slot_for(in, sym);
-	if (in->keymap_dirty && send_keymap(in) < 0) return -1;
-	int code = slot_for(in, sym);
-
-	static const uint32_t all[] = { MOD_SHIFT, MOD_CTRL, MOD_ALT, MOD_SUPER };
+	int code;
+	uint32_t level_mods;
+	if (resolve_sym(in, sym, &code, &level_mods) < 0) return -1;
+	// "ctrl+P" asks for shift twice over — once by name, once by naming a keysym
+	// that only exists at a shifted level. Either spelling holds it down.
+	mods |= level_mods;
 
 	if (down) {
-		for (size_t i = 0; i < sizeof all / sizeof *all; i++)
-			if (mods & all[i]) raw_key(in, mod_slot(all[i]) + 1, 1);
-		set_mods(in, mods);
+		hold_mods(in, mods, 1);
 		raw_key(in, code, 1);
 	}
 	if (up) {
 		raw_key(in, code, 0);
-		for (size_t i = sizeof all / sizeof *all; i-- > 0;)
-			if (mods & all[i]) raw_key(in, mod_slot(all[i]) + 1, 0);
-		set_mods(in, 0);
+		hold_mods(in, mods, 0);
 	}
 	return 0;
 }

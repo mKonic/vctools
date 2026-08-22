@@ -64,7 +64,18 @@ install: vc
 	ln -sfn $(CURDIR)/vc $(DESTDIR)$(HOME)/.local/bin/vc
 	@echo "linked $(DESTDIR)$(HOME)/.local/bin/vc -> $(CURDIR)/vc"
 
-test: vc
+# The keyboard resolution tests need no display: they compile the same keymap vc
+# sends and assert what every keysym resolves to. Run them before the smoke
+# suite, which needs a compositor and takes far longer to tell you the same.
+build/keymap_test: tests/keymap_test.c $(SRC) $(PROTO_HDR) $(PROTO_OBJ) build/obj/util.o build/obj/wl.o
+	@mkdir -p build
+	$(CC) $(CFLAGS) -o $@ tests/keymap_test.c build/obj/util.o build/obj/wl.o $(PROTO_OBJ) $(LDLIBS)
+
+.PHONY: unit
+unit: build/keymap_test
+	@./build/keymap_test
+
+test: vc unit
 	@./tests/run.sh
 
 clean:

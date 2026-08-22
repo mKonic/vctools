@@ -174,19 +174,23 @@ int vc_op(struct vc_ctx *c, int argc, char **argv) {
 		return vc_input_move_rel(&c->in, atof(argv[1]), atof(argv[2])) < 0 ? -1 : 3;
 	}
 	if (!strcmp(op, "click")) {
-		const char *btn = left >= 1 ? argv[1] : "left";
-		int consumed = left >= 1 ? 2 : 1;
+		// The button argument is optional, so it is only an argument when it names a button —
+		// otherwise `click sleep 0.4` reads "sleep" as the button and clicks nothing real.
+		int named = left >= 1 && vc_is_button_name(argv[1]);
+		const char *btn = named ? argv[1] : "left";
+		int consumed = named ? 2 : 1;
 		int count = 1;
-		if (left >= 2 && isdigit((unsigned char)argv[2][0])) {
-			count = atoi(argv[2]);
-			consumed = 3;
+		if (left >= consumed && isdigit((unsigned char)argv[consumed][0])) {
+			count = atoi(argv[consumed]);
+			consumed += 1;
 		}
 		return vc_input_click(&c->in, btn, count) < 0 ? -1 : consumed;
 	}
 	if (!strcmp(op, "down") || !strcmp(op, "up")) {
-		const char *btn = left >= 1 ? argv[1] : "left";
+		int named = left >= 1 && vc_is_button_name(argv[1]);
+		const char *btn = named ? argv[1] : "left";
 		int pressed = !strcmp(op, "down");
-		return vc_input_button(&c->in, btn, pressed) < 0 ? -1 : (left >= 1 ? 2 : 1);
+		return vc_input_button(&c->in, btn, pressed) < 0 ? -1 : (named ? 2 : 1);
 	}
 	if (!strcmp(op, "drag")) {
 		WANT(4);
