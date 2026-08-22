@@ -302,6 +302,21 @@ static int ptr_ready(struct vc_input *in) {
 		in->ptr = zwlr_virtual_pointer_manager_v1_create_virtual_pointer(in->w->pointer_mgr,
 		                                                                 in->w->seat);
 	wl_display_roundtrip(in->w->dpy);
+
+	// A fresh virtual pointer has no focused surface, and the compositor only
+	// works focus out from motion — a zero-distance move does not count. Until
+	// something moves it, buttons and wheel events are delivered to nobody, so
+	// `vc in <box> scroll -5` on its own reached no client at all and a `move`
+	// to the coordinates the cursor already sat on stayed invisible. Nudge a
+	// pixel and back: focus lands wherever the cursor already is, and the
+	// client is told the position it is at.
+	for (int i = 0; i < 2; i++) {
+		double d = i ? -1.0 : 1.0;
+		zwlr_virtual_pointer_v1_motion(in->ptr, vc_now_ms(), wl_fixed_from_double(d),
+		                               wl_fixed_from_double(d));
+		zwlr_virtual_pointer_v1_frame(in->ptr);
+	}
+	wl_display_roundtrip(in->w->dpy);
 	return 0;
 }
 
@@ -415,21 +430,38 @@ int vc_input_click(struct vc_input *in, const char *button, int count) {
 	return 0;
 }
 
+// One wheel detent, in its own frame. A real wheel reports each click
+// separately, and Hyprland synthesizes the continuous axis value itself rather
+// than passing ours through — so N clicks in one event leave any client that
+// reads that value (anything on wl_pointer below v9, which has no value120)
+// scrolling a single click no matter how far it was asked to go.
+#define VC_WHEEL_STEP 15.0 // the conventional value of one detent
+
+static void wheel(struct vc_input *in, uint32_t axis, double amount) {
+	int detents = (int)amount; // truncates toward zero; the rest is smooth scroll
+	double rest = amount - detents;
+	int dir = detents < 0 ? -1 : 1;
+
+	for (int i = 0; i < (detents < 0 ? -detents : detents); i++) {
+		zwlr_virtual_pointer_v1_axis_source(in->ptr, WL_POINTER_AXIS_SOURCE_WHEEL);
+		zwlr_virtual_pointer_v1_axis_discrete(in->ptr, vc_now_ms(), axis,
+		                                      wl_fixed_from_double(dir * VC_WHEEL_STEP), dir);
+		zwlr_virtual_pointer_v1_frame(in->ptr);
+		flush(in);
+	}
+	if (rest != 0) {
+		zwlr_virtual_pointer_v1_axis_source(in->ptr, WL_POINTER_AXIS_SOURCE_WHEEL);
+		zwlr_virtual_pointer_v1_axis(in->ptr, vc_now_ms(), axis,
+		                             wl_fixed_from_double(rest * VC_WHEEL_STEP));
+		zwlr_virtual_pointer_v1_frame(in->ptr);
+		flush(in);
+	}
+}
+
 int vc_input_scroll(struct vc_input *in, double dx, double dy) {
 	if (ptr_ready(in) < 0) return -1;
-	zwlr_virtual_pointer_v1_axis_source(in->ptr, WL_POINTER_AXIS_SOURCE_WHEEL);
-	if (dy != 0) {
-		zwlr_virtual_pointer_v1_axis_discrete(in->ptr, vc_now_ms(),
-		                                      WL_POINTER_AXIS_VERTICAL_SCROLL,
-		                                      wl_fixed_from_double(dy * 15.0), (int32_t)dy);
-	}
-	if (dx != 0) {
-		zwlr_virtual_pointer_v1_axis_discrete(in->ptr, vc_now_ms(),
-		                                      WL_POINTER_AXIS_HORIZONTAL_SCROLL,
-		                                      wl_fixed_from_double(dx * 15.0), (int32_t)dx);
-	}
-	zwlr_virtual_pointer_v1_frame(in->ptr);
-	flush(in);
+	if (dy != 0) wheel(in, WL_POINTER_AXIS_VERTICAL_SCROLL, dy);
+	if (dx != 0) wheel(in, WL_POINTER_AXIS_HORIZONTAL_SCROLL, dx);
 	return 0;
 }
 

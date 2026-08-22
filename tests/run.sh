@@ -19,6 +19,7 @@ check(){ if [ "$2" = "$3" ]; then ok "$1"; else bad "$1 (want '$3', got '$2')"; 
 
 cleanup() {
 	"$VC" box kill "$BOX" >/dev/null 2>&1
+	"$VC" box kill "${BOX}s" >/dev/null 2>&1
 	rm -rf "$TMP"
 }
 trap cleanup EXIT
@@ -77,6 +78,29 @@ SIG=$(grep '^signature=' "${XDG_RUNTIME_DIR:-/tmp}/vctools/$BOX/box" | cut -d= -
 "$VC" in "$BOX" move 320 240 >/dev/null 2>&1
 check "pointer lands where asked" \
 	"$(HYPRLAND_INSTANCE_SIGNATURE=$SIG hyprctl cursorpos 2>/dev/null)" "320, 240"
+
+# A wheel event reaches nobody until the virtual pointer has actually moved, so
+# this has to be the FIRST pointer op in a box of its own: run it after anything
+# else has moved the pointer and it passes whether or not that still works.
+SCROLLBOX="${BOX}s"
+if "$VC" box start "$SCROLLBOX" --size 800x600 >/dev/null 2>&1; then
+	seq 1 400 | awk '{printf "line %04d\n", $1}' > "$TMP/lines.txt"
+	"$VC" box exec "$SCROLLBOX" -- foot -T pager less "$TMP/lines.txt" >/dev/null 2>&1 &
+	"$VC" wait "$SCROLLBOX" window foot 10 >/dev/null 2>&1
+	sleep 1
+	"$VC" shot "$SCROLLBOX" pager "$TMP/pager-before.png" >/dev/null 2>&1
+	"$VC" in "$SCROLLBOX" scroll 5 >/dev/null 2>&1
+	sleep 0.6
+	"$VC" shot "$SCROLLBOX" pager "$TMP/pager-after.png" >/dev/null 2>&1
+	if cmp -s "$TMP/pager-before.png" "$TMP/pager-after.png"; then
+		bad "wheel scrolls a client with no prior move"
+	else
+		ok "wheel scrolls a client with no prior move"
+	fi
+	"$VC" box kill "$SCROLLBOX" >/dev/null 2>&1
+else
+	bad "scroll box start"
+fi
 
 # --- capture ---------------------------------------------------------------
 
