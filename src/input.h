@@ -37,6 +37,7 @@ struct vc_input {
 		int code;     // evdev scancode of the key that asserts it, -1 if none
 		uint32_t bit; // its bit in a modifier mask
 	} mods[VC_N_MODS];
+	uint32_t held;  // modifiers down through `hold`, kept across later chords
 
 	double x, y;    // last pointer position, in logical output coordinates
 	int have_pos;

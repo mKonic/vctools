@@ -231,17 +231,20 @@ static void set_mods(struct vc_input *in, uint32_t mask) {
 
 // Holds down (or lets go of) every modifier in `mask`, pressing the real key
 // as well as asserting the mask, per set_mods above.
+// Modifiers already held by `hold` stay down: a chord in between neither
+// presses them again nor lets go of them.
 static void hold_mods(struct vc_input *in, uint32_t mask, int down) {
+	const uint32_t own = mask & ~in->held;
 	if (down) {
 		for (int i = 0; i < VC_N_MODS; i++)
-			if ((mask & in->mods[i].bit) && in->mods[i].code >= 0)
+			if ((own & in->mods[i].bit) && in->mods[i].code >= 0)
 				raw_key(in, in->mods[i].code, 1);
-		set_mods(in, mask);
+		set_mods(in, in->held | mask);
 	} else {
 		for (int i = VC_N_MODS; i-- > 0;)
-			if ((mask & in->mods[i].bit) && in->mods[i].code >= 0)
+			if ((own & in->mods[i].bit) && in->mods[i].code >= 0)
 				raw_key(in, in->mods[i].code, 0);
-		set_mods(in, 0);
+		set_mods(in, in->held);
 	}
 }
 
@@ -539,7 +542,7 @@ int vc_input_type(struct vc_input *in, const char *utf8) {
 	return 0;
 }
 
-static int chord(struct vc_input *in, const char *spec, int down, int up) {
+static int chord(struct vc_input *in, const char *spec, int down, int up, int sticky) {
 	if (kbd_ready(in) < 0) return -1;
 
 	uint32_t mods;
@@ -556,8 +559,12 @@ static int chord(struct vc_input *in, const char *spec, int down, int up) {
 	if (down) {
 		hold_mods(in, mods, 1);
 		raw_key(in, code, 1);
+		if (sticky)
+			in->held |= mods;
 	}
 	if (up) {
+		if (sticky)
+			in->held &= ~mods;
 		raw_key(in, code, 0);
 		hold_mods(in, mods, 0);
 	}
@@ -565,9 +572,11 @@ static int chord(struct vc_input *in, const char *spec, int down, int up) {
 }
 
 int vc_input_key(struct vc_input *in, const char *spec) {
-	return chord(in, spec, 1, 1);
+	return chord(in, spec, 1, 1, 0);
 }
 
+// `hold` keeps its modifiers down (and asserted) through later chords until
+// the matching release.
 int vc_input_key_hold(struct vc_input *in, const char *spec, int down) {
-	return chord(in, spec, down, !down);
+	return chord(in, spec, down, !down, 1);
 }
