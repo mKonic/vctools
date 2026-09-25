@@ -8,6 +8,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/resource.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/un.h>
@@ -322,6 +323,12 @@ int vc_box_start(struct vc_box_opts *o) {
 		// the single most invasive thing a nested compositor can do; turn it off.
 		setenv("HYPRLAND_NO_SD_VARS", "1", 1);
 		setenv("HYPRLAND_NO_CRASHREPORTER", "1", 1);
+		// Hyprland makes itself SCHED_RR when the RT limit allows (audio
+		// setups raise it to 99). A box stuck in a busy loop at RT priority
+		// starves the host (Bluetooth audio stalled); a box runs as a plain
+		// process.
+		const struct rlimit no_rt = {0, 0};
+		setrlimit(RLIMIT_RTPRIO, &no_rt);
 
 		execlp("Hyprland", "Hyprland", "--socket", sockname, "--wayland-fd", "3", "-c", conf,
 		       (char *)NULL);
