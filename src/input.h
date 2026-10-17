@@ -47,6 +47,9 @@ struct vc_input {
 int  vc_input_init(struct vc_input *in, struct vc_wl *w, const char *output_name);
 void vc_input_finish(struct vc_input *in);
 
+// A keyboard on the seat without pressing anything: some clients (foot's
+// wheel in a pager) do nothing for a seat that has none.
+int  vc_input_keyboard(struct vc_input *in);
 int  vc_input_move(struct vc_input *in, double x, double y);
 int  vc_input_move_rel(struct vc_input *in, double dx, double dy);
 // Does this token name a mouse button? Ops with an optional button argument must ask, or they

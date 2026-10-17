@@ -1,6 +1,6 @@
 // vc — virtual control tools.
 //
-// Runs a GUI under test inside a nested compositor that has its own seat, then
+// Runs a GUI under test inside a headless atrium that has its own seat, then
 // drives it with synthetic input and captures it, without ever touching the
 // cursor, focus or workspace of the live session.
 #define _GNU_SOURCE
@@ -17,9 +17,8 @@ static int usage(void) {
 	fputs(
 		"usage: vc [-v] <command>\n"
 		"\n"
-		"  box start <name> [--size WxH] [--scale S] [--hide WS]\n"
-		"                   [--host-input] [--decorated] [--fullscreen]\n"
-		"                   [--rule '<lua window rule>']\n"
+		"  box start <name> [--size WxH] [--scale S] [--fullscreen]\n"
+		"                   [--rule 'app_pattern=RE FIELD=VALUE...']\n"
 		"  box kill <name> | box list | box env <name>\n"
 		"  box exec <name> -- <cmd> [args...]   run a program inside the box\n"
 		"\n"

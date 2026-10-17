@@ -215,6 +215,12 @@ static int kbd_ready(struct vc_input *in) {
 	return 0;
 }
 
+int vc_input_keyboard(struct vc_input *in) {
+	if (kbd_ready(in) < 0) return -1;
+	wl_display_roundtrip(in->w->dpy);
+	return 0;
+}
+
 static void raw_key(struct vc_input *in, int keycode, int pressed) {
 	zwp_virtual_keyboard_v1_key(in->kbd, vc_now_ms(), (uint32_t)keycode,
 	                            pressed ? WL_KEYBOARD_KEY_STATE_PRESSED

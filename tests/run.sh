@@ -24,25 +24,34 @@ cleanup() {
 }
 trap cleanup EXIT
 
-command -v hyprctl >/dev/null || { echo "these tests need a Hyprland host"; exit 77; }
+command -v atriumctl >/dev/null && atriumctl version >/dev/null 2>&1 || { echo "these tests need an atrium host"; exit 77; }
 [ -x "$VC" ] || { echo "build vc first (make)"; exit 1; }
 
-# A window's class, workspace and size are exactly what a badly behaved nested
-# compositor would disturb, so snapshot all three. The helper lives in a file
+# A window's app, space and size are exactly what a box leaking into the live
+# session would disturb, and so are the session's own: the environment systemd
+# hands new apps, and who answers notifications. The helper lives in a file
 # because quoting a JSON-munging script through the shell twice is how you end
 # up with a comparison that silently compares nothing.
 cat > "$TMP/snap.py" <<'PY'
 import json, sys
 rows = []
 for w in json.load(sys.stdin):
-    if w["class"] == "aquamarine":  # vc box windows are expected to come and go
-        continue
-    rows.append("%s|%s|%s" % (w["class"], w["workspace"]["name"], w["size"]))
+    g = w["geometry"]
+    rows.append("%s|%s|%s|%dx%d" % (w["id"], w["app_id"], w["space"], g["width"], g["height"]))
 print("\n".join(sorted(rows)))
 PY
 
 snapshot() {
-	hyprctl clients -j | python3 "$TMP/snap.py"
+	atriumctl -j windows | python3 "$TMP/snap.py"
+	systemctl --user show-environment | grep -E '^(WAYLAND_DISPLAY|DISPLAY)='
+	busctl --user call org.freedesktop.DBus /org/freedesktop/DBus org.freedesktop.DBus \
+		GetConnectionUnixProcessID s org.freedesktop.Notifications 2>/dev/null
+}
+
+# atriumctl against a box.
+boxctl() {
+	local b=$1; shift
+	(eval "$("$VC" box env "$b")"; XDG_RUNTIME_DIR="$(dirname "$WAYLAND_DISPLAY")" atriumctl -s "$ATRIUM_SOCKET" "$@")
 }
 
 echo "vctools smoke test (box: $BOX)"
@@ -74,10 +83,24 @@ fi
 sleep 0.4
 check "typed text arrives intact" "$(cat "$TMP/typed.txt" 2>/dev/null)" "vctools ok"
 
-SIG=$(grep '^signature=' "${XDG_RUNTIME_DIR:-/tmp}/vctools/$BOX/box" | cut -d= -f2)
-"$VC" in "$BOX" move 320 240 >/dev/null 2>&1
+# A click focuses the window under it, so clicking the middle of the sink
+# while another window is in front shows the pointer landed where asked.
+"$VC" box exec "$BOX" -- foot -T other sleep 600 >/dev/null 2>&1 &
+"$VC" wait "$BOX" window other 10 >/dev/null 2>&1
+sleep 0.5
+# New windows open in the middle, over the sink's; this one goes aside.
+OTHER=$(boxctl "$BOX" -j windows | python3 -c 'import json,sys; print(next(w["id"] for w in json.load(sys.stdin) if w["title"] == "other"))')
+boxctl "$BOX" move "$OTHER" 0 400 >/dev/null
+sleep 0.3
+read -r SINK CX CY <<<"$(boxctl "$BOX" -j windows | python3 -c '
+import json, sys
+for w in json.load(sys.stdin):
+    if w["title"] == "sink":
+        g = w["geometry"]; print(w["id"], g["x"] + g["width"] // 2, g["y"] + g["height"] // 2)')"
+"$VC" in "$BOX" move "$CX" "$CY" click >/dev/null 2>&1
+sleep 0.3
 check "pointer lands where asked" \
-	"$(HYPRLAND_INSTANCE_SIGNATURE=$SIG hyprctl cursorpos 2>/dev/null)" "320, 240"
+	"$(boxctl "$BOX" -j windows | python3 -c 'import json,sys; print(next((w["id"] for w in json.load(sys.stdin) if w["focused"]), ""))')" "$SINK"
 
 # A wheel event reaches nobody until the virtual pointer has actually moved, so
 # this has to be the FIRST pointer op in a box of its own: run it after anything
@@ -138,15 +161,16 @@ fi
 
 snapshot > "$TMP/host-after"
 if diff -q "$TMP/host-before" "$TMP/host-after" >/dev/null; then
-	ok "host windows untouched"
+	ok "host windows and session untouched"
 else
-	bad "host windows moved or resized:"
+	bad "host windows or session moved:"
 	diff "$TMP/host-before" "$TMP/host-after" | sed 's/^/       /'
 fi
 
+SOCK=$(eval "$("$VC" box env "$BOX")"; echo "$WAYLAND_DISPLAY")
 "$VC" box kill "$BOX" >/dev/null 2>&1
 sleep 0.5
-if [ -S "${XDG_RUNTIME_DIR:-/tmp}/vc-$BOX" ]; then
+if [ -S "$SOCK" ]; then
 	bad "box kill removes the socket"
 else
 	ok "box kill removes the socket"
