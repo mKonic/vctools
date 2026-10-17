@@ -259,13 +259,15 @@ int vc_box_list(void) {
 	struct dirent *e;
 	while ((e = readdir(d))) {
 		if (e->d_name[0] == '.') continue;
+		// vc_state_get's answers share one buffer: each copied before the next.
 		const char *disp = vc_box_display(e->d_name);
 		if (!disp) continue;
+		char dispbuf[512], sizebuf[64];
+		snprintf(dispbuf, sizeof dispbuf, "%s", disp);
 		const char *size = vc_state_get(e->d_name, "size");
-		char sizebuf[64];
 		snprintf(sizebuf, sizeof sizebuf, "%s", size ? size : "?");
-		printf("%-16s %-14s %-10s %s\n", e->d_name, disp, sizebuf,
-		       vc_box_alive(e->d_name) ? "running" : "dead");
+		const int alive = vc_box_alive(e->d_name);
+		printf("%-16s %-10s %-8s %s\n", e->d_name, sizebuf, alive ? "running" : "dead", dispbuf);
 	}
 	closedir(d);
 	return 0;

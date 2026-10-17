@@ -66,7 +66,7 @@ else
 fi
 
 check "box reports its size" "$(grep -o '[0-9]*x[0-9]*' "$TMP/start.log" | tail -1)" "800x600"
-check "box is listed as running" "$("$VC" box list | awk -v b="$BOX" '$1==b{print $4}')" "running"
+check "box is listed as running" "$("$VC" box list | awk -v b="$BOX" '$1==b{print $3}')" "running"
 
 # --- input -----------------------------------------------------------------
 
